@@ -3,6 +3,7 @@
 BASE=/mnt/onboard/.adds/claude-dash
 RUN=/tmp/claude-dash
 FB="$RUN/fbink"
+export LD_LIBRARY_PATH="$RUN:${LD_LIBRARY_PATH:-}"
 
 echo $$ > "$RUN/pid"
 FAILS=0

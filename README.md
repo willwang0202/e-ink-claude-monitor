@@ -42,8 +42,9 @@ No existing project does Claude-usage-on-Kobo/Kindle. Closest matches:
 | kindle-dash family | Server-rendered PNG → Kindle | Kindle-specific jailbreak tooling |
 
 This repo uses the proven *server-rendered-PNG* pattern with the lightest
-possible Kobo client: three busybox shell scripts + one static `fbink` binary
-(extracted from the official KOReader Kobo package). Nothing on the Kobo's
+possible Kobo client: three busybox shell scripts + one `fbink` binary
+(FBInk v1.25.0 official Kobo build, GPLv3 — note that KOReader's bundled
+fbink is a *minimal* build without image support and won't work here). Nothing on the Kobo's
 root filesystem is modified except by NickelMenu's own standard installer.
 
 ## Setup

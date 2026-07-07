@@ -1,6 +1,7 @@
 #!/bin/sh
 # Claude Dash — stop the refresh loop.
 RUN=/tmp/claude-dash
+export LD_LIBRARY_PATH="$RUN:${LD_LIBRARY_PATH:-}"
 
 if [ -f "$RUN/pid" ]; then
     kill "$(cat "$RUN/pid")" 2>/dev/null

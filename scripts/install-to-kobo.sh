@@ -29,6 +29,7 @@ fi
 echo "Kobo found at $KOBO — installing Claude Dash..."
 mkdir -p "$KOBO/.adds/claude-dash" "$KOBO/.adds/nm"
 cp "$REPO_DIR"/kobo/adds/claude-dash/fbink \
+   "$REPO_DIR"/kobo/adds/claude-dash/libfbink.so.1 \
    "$REPO_DIR"/kobo/adds/claude-dash/start.sh \
    "$REPO_DIR"/kobo/adds/claude-dash/loop.sh \
    "$REPO_DIR"/kobo/adds/claude-dash/stop.sh \
