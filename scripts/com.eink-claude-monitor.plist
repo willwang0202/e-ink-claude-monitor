@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Optional: auto-start the dashboard server at login.
+     Install:  cp scripts/com.eink-claude-monitor.plist ~/Library/LaunchAgents/
+               launchctl load ~/Library/LaunchAgents/com.eink-claude-monitor.plist
+     Remove:   launchctl unload ~/Library/LaunchAgents/com.eink-claude-monitor.plist -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.eink-claude-monitor</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/edu/e-ink-claude-monitor/scripts/start-server.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/eink-claude-monitor.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/eink-claude-monitor.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/edu/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

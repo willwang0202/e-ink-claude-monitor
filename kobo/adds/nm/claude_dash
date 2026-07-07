@@ -1,0 +1,4 @@
+menu_item :main :Claude Dash Start :cmd_spawn :quiet :sh /mnt/onboard/.adds/claude-dash/start.sh
+menu_item :main :Claude Dash Stop :cmd_spawn :quiet :sh /mnt/onboard/.adds/claude-dash/stop.sh
+menu_item :main :Claude Dash Force WiFi :nickel_setting :enable :force_wifi
+  chain_success :nickel_wifi :autoconnect

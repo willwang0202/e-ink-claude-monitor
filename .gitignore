@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+._*
+# rendered previews contain real usage data
+docs-preview.png
