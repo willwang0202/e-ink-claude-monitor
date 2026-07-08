@@ -1,5 +1,5 @@
 #!/bin/sh
-# Claude Dash — fetch/display loop. Started by start.sh, stopped by stop.sh.
+# Claude Dash — fetch/display loop (diagnostic build).
 BASE=/mnt/onboard/.adds/claude-dash
 RUN=/tmp/claude-dash
 FB="$RUN/fbink"
@@ -8,6 +8,17 @@ export LD_LIBRARY_PATH="$RUN:${LD_LIBRARY_PATH:-}"
 echo $$ > "$RUN/pid"
 FAILS=0
 LAST_SUM=""
+
+log() {
+    echo "$(date '+%H:%M:%S') $*" >> "$RUN/log"
+    [ -d "$BASE" ] && echo "$(date '+%H:%M:%S') $*" >> "$BASE/device.log" 2>/dev/null
+}
+diag() {
+    wget -q -T 5 -O /dev/null "$SERVER_URL/diag?$1" 2>/dev/null
+}
+san() {
+    tr -c 'A-Za-z0-9._=-' '_' | head -c 200
+}
 
 # Own IP on the WLAN, e.g. 192.168.0.42 (busybox ifconfig format).
 my_ip() {
@@ -54,12 +65,18 @@ while : ; do
         # Skip the e-ink flash when the image hasn't changed.
         if [ -z "$SUM" ] || [ "$SUM" != "$LAST_SUM" ]; then
             mv "$RUN/dash.png.tmp" "$RUN/dash.png"
-            # -c clear, -f flash (full refresh, kills ghosting), -g image
-            "$FB" -q -c -f -g file="$RUN/dash.png",halign=CENTER,valign=CENTER
+            # -c clear, -f flash (full refresh), -g draw image
+            ERR="$("$FB" -c -f \
+                -g file="$RUN/dash.png",halign=CENTER,valign=CENTER 2>&1)"
+            RC=$?
+            diag "stage=draw&rc=$RC&err=$(printf %s "$ERR" | san)"
+            log "draw rc=$RC err=$ERR"
             LAST_SUM="$SUM"
         fi
     else
         FAILS=$((FAILS + 1))
+        diag "stage=fetchfail&n=$FAILS"
+        log "fetch failed ($FAILS) from $SERVER_URL"
         # Leave the last good image up briefly, then try to re-find the
         # server (its DHCP address may have changed).
         if [ "$FAILS" -ge 3 ]; then

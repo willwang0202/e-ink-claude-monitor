@@ -52,10 +52,11 @@ class DashboardState:
             started = time.monotonic()
             try:
                 self.refresh()
-                print("[refresh] ok in {:.1f}s".format(
-                    time.monotonic() - started))
+                print("[refresh {}] ok in {:.1f}s".format(
+                    time.strftime("%H:%M:%S"), time.monotonic() - started))
             except Exception as error:  # keep serving the last good image
-                print("[refresh] FAILED: {}".format(error))
+                print("[refresh {}] FAILED: {}".format(
+                    time.strftime("%H:%M:%S"), error))
 
     @property
     def png(self) -> bytes:
@@ -90,7 +91,8 @@ def make_handler(state: DashboardState):
             self.wfile.write(body)
 
         def log_message(self, fmt, *args):
-            print("[http] {} {}".format(self.address_string(), fmt % args))
+            print("[http {}] {} {}".format(
+                time.strftime("%H:%M:%S"), self.address_string(), fmt % args))
 
     return Handler
 
