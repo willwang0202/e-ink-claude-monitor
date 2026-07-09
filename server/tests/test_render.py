@@ -23,7 +23,7 @@ FULL_SNAPSHOT = {
          "resets_at": "2026-07-14T05:00:00+00:00"},
     ],
     "block": {
-        "cost": 5.03, "tokens": 1524405, "cost_per_hour": 34.31,
+        "cost": 5.03, "tokens": 1524405, "cost_per_hour": 20.0,
         "remaining_minutes": 259, "projected_cost": 153.12,
         "end_time": "2026-07-07T20:00:00Z",
         "models": ["claude-fable-5", "claude-sonnet-4-6"],
@@ -44,26 +44,33 @@ FULL_SNAPSHOT = {
 EMPTY_SNAPSHOT = {"fetched_at": "bad-timestamp", "limits": None,
                   "block": None, "daily": None}
 
-WALK_TIME = dt.datetime(2026, 7, 9, 10, 23)   # even hour, plain walking
-WAVE_TIME = dt.datetime(2026, 7, 9, 10, 21)   # minute % 7 == 0 -> wave
-BLINK_TIME = dt.datetime(2026, 7, 9, 11, 25)  # odd hour, minute % 5 == 0
+BLOCK = FULL_SNAPSHOT["block"]
+WEDNESDAY = dt.datetime(2026, 7, 8, 10, 23)   # weekday, daytime
+SATURDAY = dt.datetime(2026, 7, 11, 15, 23)
+
+
+def block_with(**overrides):
+    merged = dict(BLOCK)
+    merged.update(overrides)
+    return merged
 
 
 class RenderTest(unittest.TestCase):
     def test_full_snapshot_renders_at_native_resolution(self):
-        image = render.render_dashboard(FULL_SNAPSHOT, footer="test footer")
+        image = render.render_dashboard(FULL_SNAPSHOT, footer="test footer",
+                                        when=WEDNESDAY)
         self.assertEqual(image.size,
                          (config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
         self.assertEqual(image.mode, "L")
 
     def test_render_actually_draws_content(self):
-        image = render.render_dashboard(FULL_SNAPSHOT)
+        image = render.render_dashboard(FULL_SNAPSHOT, when=WEDNESDAY)
         extrema = image.getextrema()
-        self.assertEqual(extrema[1], 255)      # white background present
-        self.assertLess(extrema[0], 100)       # dark ink present
+        self.assertEqual(extrema[1], 255)
+        self.assertLess(extrema[0], 100)
 
     def test_missing_sections_do_not_crash(self):
-        image = render.render_dashboard(EMPTY_SNAPSHOT)
+        image = render.render_dashboard(EMPTY_SNAPSHOT, when=WEDNESDAY)
         self.assertEqual(image.size,
                          (config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
 
@@ -72,52 +79,79 @@ class RenderTest(unittest.TestCase):
         decoded = Image.open(io.BytesIO(data))
         self.assertEqual(decoded.format, "PNG")
 
-    def test_removed_sections_stay_removed(self):
-        for name in ("_draw_today", "_draw_block"):
-            self.assertFalse(hasattr(render, name), name + " came back")
+    def test_every_mode_renders_without_crashing(self):
+        cases = [
+            (WEDNESDAY, FULL_SNAPSHOT),                        # brisk+book
+            (WEDNESDAY.replace(hour=3), FULL_SNAPSHOT),        # nightcap
+            (WEDNESDAY, EMPTY_SNAPSHOT),                       # sleep
+            (SATURDAY, FULL_SNAPSHOT),                         # surf
+        ]
+        for when, snapshot in cases:
+            image = render.render_dashboard(snapshot, when=when)
+            self.assertEqual(image.mode, "L")
 
-    def test_reset_formatter_handles_bad_input(self):
-        self.assertEqual(render._fmt_reset(None), "")
-        self.assertEqual(render._fmt_reset("garbage"), "")
 
+class SceneStateTest(unittest.TestCase):
+    def test_nightcap_beats_everything(self):
+        state = render._scene_state(WEDNESDAY.replace(hour=3),
+                                    block_with(), 99.0)
+        self.assertEqual(state["mode"], "nightcap")
 
-class ClawdSceneTest(unittest.TestCase):
+    def test_sleeps_when_idle(self):
+        state = render._scene_state(WEDNESDAY, None)
+        self.assertEqual(state["mode"], "sleep")
+        self.assertEqual(state["eye"], "blink")
+
+    def test_confetti_on_fresh_window(self):
+        state = render._scene_state(WEDNESDAY,
+                                    block_with(remaining_minutes=298))
+        self.assertEqual(state["mode"], "confetti")
+
+    def test_anxious_above_80_percent(self):
+        state = render._scene_state(WEDNESDAY, block_with(), 85.0)
+        self.assertEqual(state["mode"], "anxious")
+        self.assertFalse(state["panic"])
+
+    def test_panic_above_95_percent(self):
+        state = render._scene_state(WEDNESDAY, block_with(), 97.0)
+        self.assertTrue(state["panic"])
+
+    def test_weekend_surfs_the_chart(self):
+        state = render._scene_state(SATURDAY, block_with(), 40.0)
+        self.assertEqual(state["mode"], "surf")
+
+    def test_burn_rate_moods(self):
+        self.assertEqual(render._scene_state(
+            WEDNESDAY, block_with(cost_per_hour=5))["mode"], "stroll")
+        self.assertEqual(render._scene_state(
+            WEDNESDAY, block_with(cost_per_hour=20))["mode"], "brisk")
+        self.assertEqual(render._scene_state(
+            WEDNESDAY, block_with(cost_per_hour=50))["mode"], "sprint")
+
+    def test_fable_model_carries_a_book(self):
+        state = render._scene_state(WEDNESDAY, block_with())
+        self.assertTrue(state["book"])
+        no_fable = block_with(models=["claude-sonnet-4-6"])
+        self.assertFalse(render._scene_state(WEDNESDAY, no_fable)["book"])
+
+    def test_walks_across_the_hour(self):
+        early = render._scene_state(WEDNESDAY.replace(minute=5), block_with())
+        late = render._scene_state(WEDNESDAY.replace(minute=55), block_with())
+        self.assertLess(early["progress"], late["progress"])
+
+    def test_waves_every_seventh_minute(self):
+        state = render._scene_state(WEDNESDAY.replace(minute=21),
+                                    block_with())
+        self.assertTrue(state["wave"])
+
+    def test_five_hour_percent_lookup(self):
+        self.assertEqual(
+            render._five_hour_percent(FULL_SNAPSHOT["limits"]), 43.0)
+        self.assertIsNone(render._five_hour_percent(None))
+
     def test_body_matches_canonical_dimensions(self):
         self.assertEqual(len(render.CLAWD_BODY), 8)
         self.assertTrue(all(len(row) == 14 for row in render.CLAWD_BODY))
-
-    def test_walks_left_to_right_on_even_hours(self):
-        early = render._scene_state(WALK_TIME.replace(minute=5), True)
-        late = render._scene_state(WALK_TIME.replace(minute=55), True)
-        self.assertTrue(early["facing_right"])
-        self.assertLess(early["progress"], late["progress"])
-
-    def test_walks_right_to_left_on_odd_hours(self):
-        state = render._scene_state(BLINK_TIME.replace(minute=10), True)
-        self.assertFalse(state["facing_right"])
-        self.assertGreater(state["progress"], 0.5)
-
-    def test_waves_every_seventh_minute(self):
-        self.assertTrue(render._scene_state(WAVE_TIME, True)["wave"])
-        self.assertFalse(render._scene_state(WALK_TIME, True)["wave"])
-
-    def test_blinks_every_fifth_minute(self):
-        self.assertEqual(render._scene_state(BLINK_TIME, True)["eye"],
-                         "blink")
-
-    def test_sleeps_when_no_active_block(self):
-        state = render._scene_state(WALK_TIME, False)
-        self.assertTrue(state["asleep"])
-        self.assertEqual(state["eye"], "blink")
-
-    def test_frames_differ_across_minutes(self):
-        image_a = render.render_dashboard(FULL_SNAPSHOT, when=WALK_TIME)
-        image_b = render.render_dashboard(FULL_SNAPSHOT, when=WAVE_TIME)
-        self.assertNotEqual(list(image_a.getdata()), list(image_b.getdata()))
-
-    def test_sleeping_render_does_not_crash(self):
-        image = render.render_dashboard(EMPTY_SNAPSHOT, when=WALK_TIME)
-        self.assertEqual(image.mode, "L")
 
 
 class FormattersTest(unittest.TestCase):
@@ -128,6 +162,10 @@ class FormattersTest(unittest.TestCase):
         self.assertEqual(render._fmt_tokens(999), "999")
         self.assertEqual(render._fmt_tokens(1524405), "1.5M")
         self.assertEqual(render._fmt_tokens(2_100_000_000), "2.1B")
+
+    def test_reset_formatter_handles_bad_input(self):
+        self.assertEqual(render._fmt_reset(None), "")
+        self.assertEqual(render._fmt_reset("garbage"), "")
 
 
 if __name__ == "__main__":

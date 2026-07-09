@@ -1,12 +1,17 @@
 """Renders a usage snapshot into an e-ink friendly grayscale PNG.
 
-Layout: header, a large stage for Clawd (Claude Code's mascot, canonical
-14x8 pixel grid from the official clawd-animation spec), the 7-day bar
-chart, and the month total. One animation frame per refresh.
+Layout: header, plan-limit bars, a stage for Clawd (Claude Code's
+mascot, canonical 14x8 rectangle sprite), the 7-day chart, month total.
+
+Clawd is a mood engine — one frame per refresh, priority-ordered:
+night (00-07) nightcap sleep > idle sleep > fresh-window confetti >
+limit anxiety (5h >= 80%) > weekend chart-surfing > burn-rate walk
+(stroll / brisk+sweat / sprint). Carrying a book means Fable is active.
 """
 
 import datetime as dt
 import io
+import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,6 +31,15 @@ BAR_HEIGHT = 44
 
 # Vertical space reserved below Clawd's stage for chart + month + footer.
 LOWER_SECTIONS_HEIGHT = 700
+
+# Mood thresholds.
+NIGHT_END_HOUR = 7
+BURN_BRISK_PER_HOUR = 10.0
+BURN_SPRINT_PER_HOUR = 35.0
+ANXIETY_PERCENT = 80.0
+PANIC_PERCENT = 95.0
+# A 5h block starts with 300 minutes; this fresh means it just reset.
+CONFETTI_REMAINING_MINUTES = 296
 
 
 def _first_existing(paths: List[str]) -> Optional[str]:
@@ -221,6 +235,7 @@ CLAWD_HEART = [
     [0, 0, 1, 0, 0],
 ]
 CLAWD_SCALE = 24
+WALK_MODES = ("stroll", "brisk", "sprint")
 
 # Fixed starfield for the stage, as (x-fraction, y-fraction, shade).
 STAGE_STARS = [
@@ -231,21 +246,51 @@ STAGE_STARS = [
 ]
 
 
-def _scene_state(when: dt.datetime, is_active: bool) -> Dict[str, Any]:
-    """Pure animation state for one frame: where Clawd is and his mood.
+def _five_hour_percent(limits: Optional[List[Dict[str, Any]]]
+                       ) -> Optional[float]:
+    for window in limits or []:
+        if window.get("label") == "5 hour":
+            return float(window.get("percent", 0))
+    return None
 
-    He crosses the stage once per hour (ping-pong on odd hours), blinks
-    every 5th minute, waves every 7th, and sleeps when no Claude Code
-    session is active.
-    """
+
+def _scene_state(when: dt.datetime, block: Optional[Dict[str, Any]],
+                 five_hour_pct: Optional[float] = None) -> Dict[str, Any]:
+    """Pure mood selection for one frame. See module docstring for the
+    priority ladder."""
     minute = when.minute
-    if not is_active:
-        return {"progress": 0.5, "eye": "blink", "wave": False,
-                "asleep": True, "facing_right": True, "step": 0}
-    progress = minute / 59.0
     facing_right = when.hour % 2 == 0
+    progress = minute / 59.0
     if not facing_right:
         progress = 1.0 - progress
+    base = {
+        "mode": "stroll", "progress": progress, "eye": "forward",
+        "wave": False, "step": minute % 2, "facing_right": facing_right,
+        "book": False, "panic": False, "minute": minute,
+    }
+    if when.hour < NIGHT_END_HOUR:
+        return {**base, "mode": "nightcap", "eye": "blink",
+                "progress": 0.5, "step": 0}
+    if block is None:
+        return {**base, "mode": "sleep", "eye": "blink",
+                "progress": 0.5, "step": 0}
+    if block.get("remaining_minutes", 0) >= CONFETTI_REMAINING_MINUTES:
+        return {**base, "mode": "confetti", "wave": True,
+                "progress": 0.5, "step": 0}
+    if five_hour_pct is not None and five_hour_pct >= ANXIETY_PERCENT:
+        return {**base, "mode": "anxious", "progress": 0.5, "step": 0,
+                "panic": five_hour_pct >= PANIC_PERCENT}
+    book = any("fable" in str(model) for model in block.get("models", []))
+    if when.weekday() >= 5:  # weekend: surf the chart
+        return {**base, "mode": "surf", "eye": "look_down",
+                "wave": minute % 7 == 0, "book": book, "step": 0}
+    burn = float(block.get("cost_per_hour", 0) or 0)
+    if burn >= BURN_SPRINT_PER_HOUR:
+        mode = "sprint"
+    elif burn >= BURN_BRISK_PER_HOUR:
+        mode = "brisk"
+    else:
+        mode = "stroll"
     wave = minute % 7 == 0
     if wave:
         eye = "forward"
@@ -253,9 +298,7 @@ def _scene_state(when: dt.datetime, is_active: bool) -> Dict[str, Any]:
         eye = "blink"
     else:
         eye = "look_right" if facing_right else "look_left"
-    return {"progress": progress, "eye": eye, "wave": wave,
-            "asleep": False, "facing_right": facing_right,
-            "step": minute % 2}
+    return {**base, "mode": mode, "eye": eye, "wave": wave, "book": book}
 
 
 def _draw_star(draw: ImageDraw.ImageDraw, x: int, y: int, shade: int) -> None:
@@ -268,8 +311,9 @@ def _draw_star(draw: ImageDraw.ImageDraw, x: int, y: int, shade: int) -> None:
 
 
 def _draw_clawd_sprite(draw: ImageDraw.ImageDraw, x0: int, y0: int,
-                       state: Dict[str, Any]) -> None:
-    scale = CLAWD_SCALE
+                       state: Dict[str, Any],
+                       scale: Optional[int] = None) -> None:
+    scale = scale if scale is not None else CLAWD_SCALE
 
     def cell(col: float, row: float, shade: int) -> None:
         x = x0 + int(col * scale)
@@ -296,10 +340,100 @@ def _draw_clawd_sprite(draw: ImageDraw.ImageDraw, x0: int, y0: int,
             cell(ex + dx, ey + dy, BLACK)
 
 
-def _draw_clawd_stage(canvas: Canvas, is_active: bool,
-                      when: Optional[dt.datetime] = None) -> None:
+def _draw_zzz(canvas: Canvas, x: int, y: int, letters=("z", "Z", "Z")) -> None:
+    for index, letter in enumerate(letters):
+        canvas.draw.text((x + index * 42, y - index * 52),
+                         letter, font=canvas.fonts["zzz"], fill=MID)
+
+
+def _draw_nightcap(canvas: Canvas, x0: int, y0: int) -> None:
+    scale = CLAWD_SCALE
+    cap_x = x0 + 3 * scale
+    for tier in range(4):
+        width = (5 - tier) * scale
+        canvas.draw.rectangle(
+            [cap_x + tier * 10, y0 - (tier + 1) * scale,
+             cap_x + tier * 10 + width, y0 - tier * scale], fill=DARK)
+    tassel = cap_x + 3 * 10 + 2 * scale
+    canvas.draw.rectangle(
+        [tassel, y0 - 5 * scale, tassel + 14, y0 - 5 * scale + 14],
+        fill=LIGHT)
+
+
+def _draw_exclaim(canvas: Canvas, x: int, y: int) -> None:
+    canvas.draw.rectangle([x, y, x + 14, y + 42], fill=BLACK)
+    canvas.draw.rectangle([x, y + 56, x + 14, y + 70], fill=BLACK)
+
+
+def _draw_sweat(canvas: Canvas, x: int, y: int) -> None:
+    canvas.draw.rectangle([x + 6, y, x + 16, y + 12], fill=MID)
+    canvas.draw.rectangle([x, y + 12, x + 22, y + 40], fill=MID)
+
+
+def _draw_speed_lines(canvas: Canvas, x0: int, y0: int,
+                      facing_right: bool) -> None:
+    for index in range(3):
+        line_y = y0 + 24 + index * 40
+        length = 90 - index * 14
+        if facing_right:
+            x1, x2 = x0 - 40 - length, x0 - 40
+        else:
+            sprite_w = len(CLAWD_BODY[0]) * CLAWD_SCALE
+            x1, x2 = x0 + sprite_w + 40, x0 + sprite_w + 40 + length
+        canvas.draw.rectangle([x1, line_y, x2, line_y + 8], fill=LIGHT)
+
+
+def _draw_confetti(canvas: Canvas, x0: int, y0: int, top: int,
+                   minute: int) -> None:
+    rng = random.Random(minute)
+    sprite_w = len(CLAWD_BODY[0]) * CLAWD_SCALE
+    for _ in range(30):
+        cx = x0 + rng.randint(-160, sprite_w + 160)
+        cy = rng.randint(top + 10, y0 + 40)
+        # keep confetti off his face
+        if x0 + 40 < cx < x0 + sprite_w - 40 and cy > y0 - 30:
+            continue
+        size = rng.choice((8, 10, 12))
+        shade = rng.choice((BLACK, DARK, MID, LIGHT))
+        canvas.draw.rectangle([cx, cy, cx + size, cy + size], fill=shade)
+
+
+def _draw_book(canvas: Canvas, x0: int, y0: int,
+               facing_right: bool) -> None:
+    scale = CLAWD_SCALE
+    sprite_w = len(CLAWD_BODY[0]) * scale
+    book_w, book_h = int(3.2 * scale), int(2.2 * scale)
+    by = y0 + 2 * scale - 8
+    if facing_right:
+        bx = x0 + sprite_w - scale // 2
+        text_x = bx + book_w + 12
+    else:
+        bx = x0 - book_w + scale // 2
+        text_x = bx - 120
+    canvas.draw.rectangle([bx, by, bx + book_w, by + book_h],
+                          fill=WHITE, outline=BLACK, width=4)
+    canvas.draw.rectangle([bx + book_w // 2 - 2, by,
+                           bx + book_w // 2 + 2, by + book_h], fill=BLACK)
+    canvas.draw.text((text_x, by + book_h + 6), "a fable",
+                     font=canvas.fonts["tiny"], fill=MID)
+
+
+def _draw_heart(canvas: Canvas, x: int, y: int) -> None:
+    half = CLAWD_SCALE // 2
+    for row_index, row in enumerate(CLAWD_HEART):
+        for col_index, filled in enumerate(row):
+            if filled:
+                px = x + col_index * half
+                py = y + row_index * half
+                canvas.draw.rectangle(
+                    [px, py, px + half - 1, py + half - 1], fill=DARK)
+
+
+def _draw_clawd_stage(canvas: Canvas, snapshot: Dict[str, Any],
+                      when: Optional[dt.datetime] = None) -> Dict[str, Any]:
     now = when if when is not None else dt.datetime.now()
-    state = _scene_state(now, is_active)
+    state = _scene_state(now, snapshot.get("block"),
+                         _five_hour_percent(snapshot.get("limits")))
 
     top = canvas.y
     bottom = canvas.image.height - LOWER_SECTIONS_HEIGHT
@@ -308,45 +442,61 @@ def _draw_clawd_stage(canvas: Canvas, is_active: bool,
                    MARGIN + int(x_frac * (canvas.width - 2 * MARGIN)),
                    top + int(y_frac * (bottom - top)), shade)
 
-    sprite_width = len(CLAWD_BODY[0]) * CLAWD_SCALE
-    sprite_height = len(CLAWD_BODY) * CLAWD_SCALE
     ground = bottom - 30
-    track = canvas.width - 2 * MARGIN - sprite_width - 2 * CLAWD_SCALE
-    x0 = MARGIN + CLAWD_SCALE + int(track * state["progress"])
-    # Walk cycle: a half-cell hop on alternating minutes.
-    y0 = ground - sprite_height - (CLAWD_SCALE // 2 if state["step"] else 0)
-
-    _draw_clawd_sprite(canvas.draw, x0, y0, state)
-
-    if state["asleep"]:
-        for index, letter in enumerate(("z", "Z", "Z")):
-            canvas.draw.text(
-                (x0 + sprite_width + 10 + index * 42,
-                 y0 - 40 - index * 52),
-                letter, font=canvas.fonts["zzz"], fill=MID,
-            )
-    elif now.minute % 13 == 0:  # occasional little heart
-        heart_x = x0 + sprite_width + 14
-        heart_y = y0 - 3 * CLAWD_SCALE
-        for row_index, row in enumerate(CLAWD_HEART):
-            for col_index, filled in enumerate(row):
-                if filled:
-                    x = heart_x + col_index * (CLAWD_SCALE // 2)
-                    y = heart_y + row_index * (CLAWD_SCALE // 2)
-                    canvas.draw.rectangle(
-                        [x, y, x + CLAWD_SCALE // 2 - 1,
-                         y + CLAWD_SCALE // 2 - 1], fill=DARK)
-
     canvas.draw.rectangle(
         [MARGIN, ground + 6, canvas.width - MARGIN, ground + 9], fill=LIGHT
     )
+
+    if state["mode"] == "surf":
+        # Clawd appears on the chart instead; stage keeps just the stars.
+        canvas.y = bottom + 10
+        canvas.rule()
+        return state
+
+    sprite_w = len(CLAWD_BODY[0]) * CLAWD_SCALE
+    sprite_h = len(CLAWD_BODY) * CLAWD_SCALE
+    track = canvas.width - 2 * MARGIN - sprite_w - 2 * CLAWD_SCALE
+    x0 = MARGIN + CLAWD_SCALE + int(track * state["progress"])
+    hop = CLAWD_SCALE // 2 if (state["mode"] in WALK_MODES
+                               and state["step"]) else 0
+    y0 = ground - sprite_h - hop
+
+    if state["mode"] == "sprint":
+        _draw_speed_lines(canvas, x0, y0, state["facing_right"])
+    _draw_clawd_sprite(canvas.draw, x0, y0, state)
+
+    if state["mode"] in ("sleep", "nightcap"):
+        _draw_zzz(canvas, x0 + sprite_w + 16, y0 - 40)
+        if state["mode"] == "nightcap":
+            _draw_nightcap(canvas, x0, y0)
+    elif state["mode"] == "confetti":
+        _draw_confetti(canvas, x0, y0, top, state["minute"])
+    elif state["mode"] == "anxious":
+        center = x0 + sprite_w // 2
+        _draw_exclaim(canvas, center - 7, y0 - 100)
+        if state["panic"]:
+            _draw_exclaim(canvas, center + 21, y0 - 100)
+    elif state["mode"] == "sprint":
+        edge = x0 + sprite_w + 20 if state["facing_right"] else x0 - 40
+        _draw_exclaim(canvas, edge, y0 - 60)
+    elif state["mode"] == "brisk":
+        edge = x0 + sprite_w - 6 if state["facing_right"] else x0 - 20
+        _draw_sweat(canvas, edge, y0 - 44)
+
+    if state["book"] and state["mode"] in WALK_MODES:
+        _draw_book(canvas, x0, y0, state["facing_right"])
+    if state["mode"] in WALK_MODES and state["minute"] % 13 == 0:
+        _draw_heart(canvas, x0 + sprite_w + 14, y0 - 3 * CLAWD_SCALE)
+
     canvas.y = bottom + 10
     canvas.rule()
+    return state
 
 
 # ------------------------------------------------------------- sections
 
-def _draw_chart(canvas: Canvas, daily: Optional[Dict[str, Any]]) -> None:
+def _draw_chart(canvas: Canvas, daily: Optional[Dict[str, Any]],
+                scene: Optional[Dict[str, Any]] = None) -> None:
     canvas.section_title("Last 7 days")
     if not daily:
         canvas.text(MARGIN, "ccusage unavailable", "body", fill=MID)
@@ -364,6 +514,7 @@ def _draw_chart(canvas: Canvas, daily: Optional[Dict[str, Any]]) -> None:
     bar_width = int(slot * 0.62)
     peak = max((day["cost"] for day in chart), default=0.0) or 1.0
     baseline = top + CHART_HEIGHT
+    peak_index = max(range(len(chart)), key=lambda i: chart[i]["cost"])
     for index, day in enumerate(chart):
         x = MARGIN + index * slot + (slot - bar_width) // 2
         height = int((day["cost"] / peak) * (CHART_HEIGHT - 40))
@@ -377,7 +528,10 @@ def _draw_chart(canvas: Canvas, daily: Optional[Dict[str, Any]]) -> None:
             canvas.draw.rectangle(
                 [x, baseline - 3, x + bar_width, baseline], fill=LIGHT
             )
-        if day["cost"] >= 0.005:
+        surfing_here = (scene is not None
+                        and scene.get("mode") == "surf"
+                        and index == peak_index)
+        if day["cost"] >= 0.005 and not surfing_here:
             label = "{:.0f}".format(day["cost"])
             box = canvas.draw.textbbox((0, 0), label, font=canvas.fonts["tiny"])
             canvas.draw.text(
@@ -392,6 +546,24 @@ def _draw_chart(canvas: Canvas, daily: Optional[Dict[str, Any]]) -> None:
             day["label"], font=canvas.fonts["small"],
             fill=BLACK if is_today else MID,
         )
+    if scene and scene.get("mode") == "surf":
+        # Weekend Easter egg: a mini Clawd peeks from behind the week's
+        # tallest bar (his lower body is occluded by the bar itself).
+        mini = 14
+        sprite_w = len(CLAWD_BODY[0]) * mini
+        sprite_h = len(CLAWD_BODY) * mini
+        peak_height = int((chart[peak_index]["cost"] / peak)
+                          * (CHART_HEIGHT - 40))
+        bar_x = MARGIN + peak_index * slot + (slot - bar_width) // 2
+        x = bar_x + bar_width // 2 - sprite_w // 2
+        x = max(MARGIN, min(x, canvas.width - MARGIN - sprite_w))
+        bar_top = baseline - peak_height
+        _draw_clawd_sprite(canvas.draw, x,
+                           bar_top - int(sprite_h * 0.55),
+                           {**scene, "eye": "forward"}, scale=mini)
+        canvas.draw.rectangle(
+            [bar_x, bar_top, bar_x + bar_width, baseline],
+            fill=BLACK if peak_index == len(chart) - 1 else MID)
     canvas.draw.rectangle(
         [MARGIN, baseline, canvas.width - MARGIN, baseline + 3], fill=BLACK
     )
@@ -428,8 +600,8 @@ def render_dashboard(snapshot: Dict[str, Any],
     canvas = Canvas(width, height, _load_fonts())
     _draw_header(canvas, snapshot)
     _draw_limits(canvas, snapshot.get("limits"))
-    _draw_clawd_stage(canvas, snapshot.get("block") is not None, when)
-    _draw_chart(canvas, snapshot.get("daily"))
+    scene = _draw_clawd_stage(canvas, snapshot, when)
+    _draw_chart(canvas, snapshot.get("daily"), scene)
     _draw_month(canvas, snapshot.get("daily"))
     _draw_footer(canvas, footer)
     return canvas.image
