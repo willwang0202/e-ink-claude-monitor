@@ -151,16 +151,53 @@ class TokenFreshnessTest(unittest.TestCase):
         self.assertIsNone(result)
 
 
-class LimitWindowTest(unittest.TestCase):
-    def test_valid_window(self):
-        window = usage._limit_window(
-            {"utilization": 43, "resets_at": "2026-07-07T20:00:00Z"}
-        )
-        self.assertEqual(window["utilization"], 43.0)
+API_LIMITS_RESPONSE = {
+    "five_hour": {"utilization": 43.0, "resets_at": "2026-07-09T02:00:00Z"},
+    "seven_day": {"utilization": 27.0, "resets_at": "2026-07-14T05:00:00Z"},
+    "limits": [
+        {"kind": "session", "group": "session", "percent": 43,
+         "resets_at": "2026-07-09T02:00:00Z", "scope": None},
+        {"kind": "weekly_all", "group": "weekly", "percent": 27,
+         "resets_at": "2026-07-14T05:00:00Z", "scope": None},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 41,
+         "resets_at": "2026-07-14T05:00:00Z",
+         "scope": {"model": {"id": None, "display_name": "Fable"},
+                   "surface": None}},
+    ],
+}
 
-    def test_missing_utilization_returns_none(self):
-        self.assertIsNone(usage._limit_window({"resets_at": "x"}))
-        self.assertIsNone(usage._limit_window(None))
+
+class ParseLimitsTest(unittest.TestCase):
+    def test_parses_limits_array_in_order(self):
+        windows = usage.parse_limits(API_LIMITS_RESPONSE)
+        self.assertEqual([w["label"] for w in windows],
+                         ["5 hour", "Week", "Fable"])
+        self.assertEqual([w["percent"] for w in windows],
+                         [43.0, 27.0, 41.0])
+
+    def test_model_scoped_entry_uses_display_name(self):
+        windows = usage.parse_limits(API_LIMITS_RESPONSE)
+        fable = windows[2]
+        self.assertEqual(fable["label"], "Fable")
+        self.assertEqual(fable["resets_at"], "2026-07-14T05:00:00Z")
+
+    def test_falls_back_to_legacy_fields(self):
+        legacy = {key: value for key, value in API_LIMITS_RESPONSE.items()
+                  if key != "limits"}
+        windows = usage.parse_limits(legacy)
+        self.assertEqual([w["label"] for w in windows], ["5 hour", "Week"])
+
+    def test_skips_malformed_entries(self):
+        windows = usage.parse_limits(
+            {"limits": [{"kind": "session"}, "junk",
+                        {"kind": "weekly_all", "percent": 10}]}
+        )
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]["label"], "Week")
+
+    def test_empty_response_returns_none(self):
+        self.assertIsNone(usage.parse_limits({}))
+        self.assertIsNone(usage.parse_limits({"limits": []}))
 
 
 if __name__ == "__main__":

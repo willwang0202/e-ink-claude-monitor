@@ -1,7 +1,8 @@
 """Renders a usage snapshot into an e-ink friendly grayscale PNG.
 
-Layout is a single column of sections; missing sections are skipped so
-the dashboard degrades gracefully when a data source is unavailable.
+Layout: header, a large stage for Clawd (Claude Code's mascot, canonical
+14x8 pixel grid from the official clawd-animation spec), the 7-day bar
+chart, and the month total. One animation frame per refresh.
 """
 
 import datetime as dt
@@ -20,8 +21,11 @@ LIGHT = 210
 WHITE = 255
 
 MARGIN = 56
-BAR_HEIGHT = 44
 CHART_HEIGHT = 230
+BAR_HEIGHT = 44
+
+# Vertical space reserved below Clawd's stage for chart + month + footer.
+LOWER_SECTIONS_HEIGHT = 700
 
 
 def _first_existing(paths: List[str]) -> Optional[str]:
@@ -54,13 +58,13 @@ def _load_fonts() -> Dict[str, Any]:
     regular, bold = pair if pair else (None, None)
     return {
         "title": load(bold, 64),
-        "huge": load(bold, 132),
         "big": load(bold, 78),
         "section": load(bold, 38),
         "body": load(regular, 44),
         "body_bold": load(bold, 44),
         "small": load(regular, 34),
         "tiny": load(mono_path or regular, 28),
+        "zzz": load(bold, 52),
     }
 
 
@@ -89,10 +93,6 @@ def _fmt_reset(iso_value: Optional[str]) -> str:
     now = dt.datetime.now().astimezone()
     day = "" if local.date() == now.date() else local.strftime(" %a")
     return local.strftime("%H:%M") + day
-
-
-def _short_model(name: str) -> str:
-    return name.replace("claude-", "")
 
 
 class Canvas:
@@ -174,77 +174,185 @@ def _draw_header(canvas: Canvas, snapshot: Dict[str, Any]) -> None:
     canvas.rule(6)
 
 
-def _draw_limits(canvas: Canvas, limits: Optional[Dict[str, Any]]) -> None:
-    if not limits:
-        return
+def _draw_limits(canvas: Canvas,
+                 limits: Optional[List[Dict[str, Any]]]) -> None:
     canvas.section_title("Plan limits")
-    windows = [
-        ("5 hour", limits.get("five_hour")),
-        ("Week", limits.get("seven_day")),
-        ("Opus", limits.get("seven_day_opus")),
-        ("Sonnet", limits.get("seven_day_sonnet")),
-    ]
-    for label, window in windows:
-        if not window:
-            continue
+    if not limits:
+        canvas.text(MARGIN, "unavailable — refreshes on next claude run",
+                    "small", fill=MID)
+        canvas.advance(64)
+        canvas.rule()
+        return
+    for window in limits:
         reset = _fmt_reset(window.get("resets_at"))
         note = "resets " + reset if reset else ""
-        canvas.progress_bar(label, window["utilization"], note)
+        canvas.progress_bar(window["label"], window["percent"], note)
     canvas.advance(16)
     canvas.rule()
 
 
-def _draw_block(canvas: Canvas, block: Optional[Dict[str, Any]]) -> None:
-    canvas.section_title("Current 5-hour block")
-    if not block:
-        canvas.text(MARGIN, "no active session", "body", fill=MID)
-        canvas.advance(76)
-        canvas.rule()
-        return
-    canvas.text(MARGIN, _fmt_money(block["cost"]), "huge")
-    hours, minutes = divmod(max(block["remaining_minutes"], 0), 60)
-    canvas.text_right("{}h {:02d}m left".format(hours, minutes), "body",
-                      fill=DARK, y=canvas.y + 20)
-    canvas.text_right(_fmt_tokens(block["tokens"]) + " tok", "body",
-                      fill=DARK, y=canvas.y + 76)
-    canvas.advance(158)
-    detail = "burn {}/hr   projected {}".format(
-        _fmt_money(block["cost_per_hour"]),
-        _fmt_money(block["projected_cost"]),
+# ---------------------------------------------------------------- Clawd
+# Canonical sprite from the official clawd-animation spec: 14x8 flat
+# body, 1x1 eyes at (4,1)/(9,1), no mouth. Coral #CD6E58 maps to MID.
+
+CLAWD_BODY = [
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    [0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0],
+    [0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0],
+]
+CLAWD_EYE_LEFT = (4, 1)
+CLAWD_EYE_RIGHT = (9, 1)
+CLAWD_EYES = {
+    "forward": (0, 0),
+    "look_right": (1, 0),
+    "look_left": (-1, 0),
+    "look_down": (0, 1),
+    "blink": None,
+}
+CLAWD_HEART = [
+    [1, 0, 1, 0, 0],
+    [1, 1, 1, 1, 0],
+    [0, 1, 1, 1, 0],
+    [0, 0, 1, 0, 0],
+]
+CLAWD_SCALE = 24
+
+# Fixed starfield for the stage, as (x-fraction, y-fraction, shade).
+STAGE_STARS = [
+    (0.08, 0.10, MID), (0.30, 0.05, LIGHT), (0.55, 0.12, MID),
+    (0.76, 0.06, LIGHT), (0.92, 0.16, MID), (0.14, 0.34, LIGHT),
+    (0.44, 0.28, MID), (0.68, 0.35, LIGHT), (0.88, 0.44, LIGHT),
+    (0.05, 0.52, LIGHT), (0.26, 0.55, MID), (0.61, 0.52, LIGHT),
+]
+
+
+def _scene_state(when: dt.datetime, is_active: bool) -> Dict[str, Any]:
+    """Pure animation state for one frame: where Clawd is and his mood.
+
+    He crosses the stage once per hour (ping-pong on odd hours), blinks
+    every 5th minute, waves every 7th, and sleeps when no Claude Code
+    session is active.
+    """
+    minute = when.minute
+    if not is_active:
+        return {"progress": 0.5, "eye": "blink", "wave": False,
+                "asleep": True, "facing_right": True, "step": 0}
+    progress = minute / 59.0
+    facing_right = when.hour % 2 == 0
+    if not facing_right:
+        progress = 1.0 - progress
+    wave = minute % 7 == 0
+    if wave:
+        eye = "forward"
+    elif minute % 5 == 0:
+        eye = "blink"
+    else:
+        eye = "look_right" if facing_right else "look_left"
+    return {"progress": progress, "eye": eye, "wave": wave,
+            "asleep": False, "facing_right": facing_right,
+            "step": minute % 2}
+
+
+def _draw_star(draw: ImageDraw.ImageDraw, x: int, y: int, shade: int) -> None:
+    arm = 12
+    thickness = 4
+    draw.rectangle([x - arm, y - thickness // 2,
+                    x + arm, y + thickness // 2], fill=shade)
+    draw.rectangle([x - thickness // 2, y - arm,
+                    x + thickness // 2, y + arm], fill=shade)
+
+
+def _draw_clawd_sprite(draw: ImageDraw.ImageDraw, x0: int, y0: int,
+                       state: Dict[str, Any]) -> None:
+    scale = CLAWD_SCALE
+
+    def cell(col: float, row: float, shade: int) -> None:
+        x = x0 + int(col * scale)
+        y = y0 + int(row * scale)
+        draw.rectangle([x, y, x + scale - 1, y + scale - 1], fill=shade)
+
+    for row_index, row in enumerate(CLAWD_BODY):
+        for col_index, filled in enumerate(row):
+            if filled:
+                cell(col_index, row_index, MID)
+
+    if state["wave"]:  # raised claw on the leading side
+        if state["facing_right"]:
+            cell(13, 1, MID)
+            cell(14, 0, MID)
+        else:
+            cell(0, 1, MID)
+            cell(-1, 0, MID)
+
+    eye_offset = CLAWD_EYES[state["eye"]]
+    if eye_offset is not None:
+        dx, dy = eye_offset
+        for ex, ey in (CLAWD_EYE_LEFT, CLAWD_EYE_RIGHT):
+            cell(ex + dx, ey + dy, BLACK)
+
+
+def _draw_clawd_stage(canvas: Canvas, is_active: bool,
+                      when: Optional[dt.datetime] = None) -> None:
+    now = when if when is not None else dt.datetime.now()
+    state = _scene_state(now, is_active)
+
+    top = canvas.y
+    bottom = canvas.image.height - LOWER_SECTIONS_HEIGHT
+    for x_frac, y_frac, shade in STAGE_STARS:
+        _draw_star(canvas.draw,
+                   MARGIN + int(x_frac * (canvas.width - 2 * MARGIN)),
+                   top + int(y_frac * (bottom - top)), shade)
+
+    sprite_width = len(CLAWD_BODY[0]) * CLAWD_SCALE
+    sprite_height = len(CLAWD_BODY) * CLAWD_SCALE
+    ground = bottom - 30
+    track = canvas.width - 2 * MARGIN - sprite_width - 2 * CLAWD_SCALE
+    x0 = MARGIN + CLAWD_SCALE + int(track * state["progress"])
+    # Walk cycle: a half-cell hop on alternating minutes.
+    y0 = ground - sprite_height - (CLAWD_SCALE // 2 if state["step"] else 0)
+
+    _draw_clawd_sprite(canvas.draw, x0, y0, state)
+
+    if state["asleep"]:
+        for index, letter in enumerate(("z", "Z", "Z")):
+            canvas.draw.text(
+                (x0 + sprite_width + 10 + index * 42,
+                 y0 - 40 - index * 52),
+                letter, font=canvas.fonts["zzz"], fill=MID,
+            )
+    elif now.minute % 13 == 0:  # occasional little heart
+        heart_x = x0 + sprite_width + 14
+        heart_y = y0 - 3 * CLAWD_SCALE
+        for row_index, row in enumerate(CLAWD_HEART):
+            for col_index, filled in enumerate(row):
+                if filled:
+                    x = heart_x + col_index * (CLAWD_SCALE // 2)
+                    y = heart_y + row_index * (CLAWD_SCALE // 2)
+                    canvas.draw.rectangle(
+                        [x, y, x + CLAWD_SCALE // 2 - 1,
+                         y + CLAWD_SCALE // 2 - 1], fill=DARK)
+
+    canvas.draw.rectangle(
+        [MARGIN, ground + 6, canvas.width - MARGIN, ground + 9], fill=LIGHT
     )
-    canvas.text(MARGIN, detail, "small", fill=DARK)
-    canvas.advance(56)
-    models = ", ".join(_short_model(m) for m in block.get("models", []))
-    if models:
-        canvas.text(MARGIN, models, "tiny", fill=MID)
-        canvas.advance(46)
-    canvas.advance(8)
+    canvas.y = bottom + 10
     canvas.rule()
 
 
-def _draw_today(canvas: Canvas, daily: Optional[Dict[str, Any]]) -> None:
-    canvas.section_title("Today")
+# ------------------------------------------------------------- sections
+
+def _draw_chart(canvas: Canvas, daily: Optional[Dict[str, Any]]) -> None:
+    canvas.section_title("Last 7 days")
     if not daily:
         canvas.text(MARGIN, "ccusage unavailable", "body", fill=MID)
         canvas.advance(76)
         canvas.rule()
         return
-    canvas.text(MARGIN, _fmt_money(daily["today_cost"]), "big")
-    canvas.text_right(_fmt_tokens(daily["today_tokens"]) + " tok",
-                      "body", fill=DARK, y=canvas.y + 28)
-    canvas.advance(108)
-    models = ", ".join(_short_model(m) for m in daily.get("today_models", []))
-    if models:
-        canvas.text(MARGIN, models, "tiny", fill=MID)
-        canvas.advance(46)
-    canvas.advance(8)
-    canvas.rule()
-
-
-def _draw_chart(canvas: Canvas, daily: Optional[Dict[str, Any]]) -> None:
-    if not daily:
-        return
-    canvas.section_title("Last 7 days")
     canvas.text_right(_fmt_money(daily["week_cost"]), "body_bold",
                       y=canvas.y - 58)
     chart = daily.get("chart", [])
@@ -315,12 +423,12 @@ def _draw_footer(canvas: Canvas, footer: str) -> None:
 def render_dashboard(snapshot: Dict[str, Any],
                      width: int = config.SCREEN_WIDTH,
                      height: int = config.SCREEN_HEIGHT,
-                     footer: str = "") -> Image.Image:
+                     footer: str = "",
+                     when: Optional[dt.datetime] = None) -> Image.Image:
     canvas = Canvas(width, height, _load_fonts())
     _draw_header(canvas, snapshot)
     _draw_limits(canvas, snapshot.get("limits"))
-    _draw_block(canvas, snapshot.get("block"))
-    _draw_today(canvas, snapshot.get("daily"))
+    _draw_clawd_stage(canvas, snapshot.get("block") is not None, when)
     _draw_chart(canvas, snapshot.get("daily"))
     _draw_month(canvas, snapshot.get("daily"))
     _draw_footer(canvas, footer)

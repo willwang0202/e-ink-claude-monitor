@@ -221,16 +221,47 @@ def token_is_fresh(oauth: Dict[str, Any]) -> bool:
     return expiry > dt.datetime.now() + dt.timedelta(minutes=1)
 
 
-def _limit_window(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw, dict):
-        return None
-    utilization = raw.get("utilization")
-    if utilization is None:
-        return None
-    return {
-        "utilization": float(utilization),
-        "resets_at": raw.get("resets_at"),
-    }
+def _limit_label(entry: Dict[str, Any]) -> str:
+    scope = entry.get("scope") or {}
+    model = (scope.get("model") or {}).get("display_name")
+    if model:
+        return str(model)
+    kind = str(entry.get("kind", ""))
+    if kind == "session":
+        return "5 hour"
+    if kind == "weekly_all":
+        return "Week"
+    return kind.replace("_", " ") or "limit"
+
+
+def parse_limits(data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """Normalize the usage endpoint into ordered progress-bar rows.
+
+    Prefers the newer `limits` array (which carries model-scoped windows
+    like Fable's weekly meter); falls back to the legacy five_hour /
+    seven_day fields.
+    """
+    windows: List[Dict[str, Any]] = []
+    entries = data.get("limits")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("percent") is None:
+                continue
+            windows.append({
+                "label": _limit_label(entry),
+                "percent": float(entry["percent"]),
+                "resets_at": entry.get("resets_at"),
+            })
+    if not windows:
+        for key, label in (("five_hour", "5 hour"), ("seven_day", "Week")):
+            raw = data.get(key)
+            if isinstance(raw, dict) and raw.get("utilization") is not None:
+                windows.append({
+                    "label": label,
+                    "percent": float(raw["utilization"]),
+                    "resets_at": raw.get("resets_at"),
+                })
+    return windows or None
 
 
 def fetch_plan_limits(oauth: Optional[Dict[str, Any]] = None
@@ -257,15 +288,7 @@ def fetch_plan_limits(oauth: Optional[Dict[str, Any]] = None
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
         return None
-    limits = {
-        "five_hour": _limit_window(data.get("five_hour")),
-        "seven_day": _limit_window(data.get("seven_day")),
-        "seven_day_opus": _limit_window(data.get("seven_day_opus")),
-        "seven_day_sonnet": _limit_window(data.get("seven_day_sonnet")),
-    }
-    if not any(limits.values()):
-        return None
-    return limits
+    return parse_limits(data)
 
 
 # -------------------------------------------------------------- snapshot
