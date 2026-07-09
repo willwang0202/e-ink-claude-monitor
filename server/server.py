@@ -10,6 +10,7 @@ import json
 import socket
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
@@ -37,9 +38,22 @@ class DashboardState:
         self._lock = threading.Lock()
         self._png = b""
         self._snapshot = {}
+        self._kobo_battery = None
+
+    def report_battery(self, value: str) -> None:
+        """The Kobo appends ?batt=NN to its fetches (see kobo/loop.sh)."""
+        try:
+            percent = float(value)
+        except (TypeError, ValueError):
+            return
+        if 0 <= percent <= 100:
+            with self._lock:
+                self._kobo_battery = percent
 
     def refresh(self) -> None:
         snapshot = usage.build_snapshot()
+        with self._lock:
+            snapshot["kobo_battery"] = self._kobo_battery
         png = render.render_png_bytes(snapshot, footer=self.footer)
         with self._lock:
             self._snapshot = snapshot
@@ -73,6 +87,10 @@ def make_handler(state: DashboardState):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path.startswith("/dashboard.png"):
+                query = urllib.parse.urlparse(self.path).query
+                batt = urllib.parse.parse_qs(query).get("batt")
+                if batt:
+                    state.report_battery(batt[0])
                 self._send(200, "image/png", state.png)
             elif self.path.startswith("/status.json"):
                 body = json.dumps(state.snapshot, indent=2).encode("utf-8")

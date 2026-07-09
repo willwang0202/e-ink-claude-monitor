@@ -21,6 +21,14 @@ OAUTH_BETA_HEADER = "oauth-2025-04-20"
 # Only usage rows for these model prefixes count toward the dashboard.
 CLAUDE_MODEL_PREFIX = "claude"
 
+# Grayscale palette shared by the renderer and the Clawd scene engine.
+GRAY_BLACK = 0
+GRAY_DARK = 60
+GRAY_MID = 140
+GRAY_LIGHT = 210
+GRAY_WHITE = 255
+PAGE_MARGIN = 56
+
 # Candidate (regular, bold) font pairs, first existing pair wins.
 FONT_CANDIDATES = [
     ("/System/Library/Fonts/Supplemental/Arial.ttf",

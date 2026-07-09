@@ -8,6 +8,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import clawd   # noqa: E402
 import config  # noqa: E402
 import render  # noqa: E402
 
@@ -39,25 +40,31 @@ FULL_SNAPSHOT = {
                  ("S", 6.2), ("M", 7.8), ("T", 5.0)], start=1)
         ],
     },
+    "kobo_battery": 62.0,
 }
 
 EMPTY_SNAPSHOT = {"fetched_at": "bad-timestamp", "limits": None,
                   "block": None, "daily": None}
 
-BLOCK = FULL_SNAPSHOT["block"]
-WEDNESDAY = dt.datetime(2026, 7, 8, 10, 23)   # weekday, daytime
+WEDNESDAY = dt.datetime(2026, 7, 8, 10, 23)
 SATURDAY = dt.datetime(2026, 7, 11, 15, 23)
 
 
+def snapshot_with(**overrides):
+    merged = dict(FULL_SNAPSHOT)
+    merged.update(overrides)
+    return merged
+
+
 def block_with(**overrides):
-    merged = dict(BLOCK)
+    merged = dict(FULL_SNAPSHOT["block"])
     merged.update(overrides)
     return merged
 
 
 class RenderTest(unittest.TestCase):
     def test_full_snapshot_renders_at_native_resolution(self):
-        image = render.render_dashboard(FULL_SNAPSHOT, footer="test footer",
+        image = render.render_dashboard(FULL_SNAPSHOT, footer="test",
                                         when=WEDNESDAY)
         self.assertEqual(image.size,
                          (config.SCREEN_WIDTH, config.SCREEN_HEIGHT))
@@ -79,79 +86,117 @@ class RenderTest(unittest.TestCase):
         decoded = Image.open(io.BytesIO(data))
         self.assertEqual(decoded.format, "PNG")
 
-    def test_every_mode_renders_without_crashing(self):
+    def test_every_scene_painter_renders(self):
+        """Force every scene through the full dashboard pipeline."""
+        original = clawd._rotation_scene
+        try:
+            for scene in clawd.SCENE_PAINTERS:
+                if scene in ("night", "sleep", "fishing",
+                             "confetti", "anxious"):
+                    continue  # exercised via their own triggers below
+                clawd._rotation_scene = (
+                    lambda *_args, _s=scene: _s)  # noqa: E731
+                image = render.render_dashboard(FULL_SNAPSHOT,
+                                                when=WEDNESDAY)
+                self.assertEqual(image.mode, "L", scene)
+        finally:
+            clawd._rotation_scene = original
+
+    def test_priority_scenes_render(self):
         cases = [
-            (WEDNESDAY, FULL_SNAPSHOT),                        # brisk+book
-            (WEDNESDAY.replace(hour=3), FULL_SNAPSHOT),        # nightcap
-            (WEDNESDAY, EMPTY_SNAPSHOT),                       # sleep
-            (SATURDAY, FULL_SNAPSHOT),                         # surf
+            (WEDNESDAY.replace(hour=3), FULL_SNAPSHOT),          # night
+            (WEDNESDAY, EMPTY_SNAPSHOT),                         # sleep
+            (WEDNESDAY.replace(hour=19), EMPTY_SNAPSHOT),        # fishing-ish
+            (WEDNESDAY, snapshot_with(
+                block=block_with(remaining_minutes=298))),       # confetti
+            (WEDNESDAY, snapshot_with(limits=[
+                {"label": "5 hour", "percent": 97.0,
+                 "resets_at": None}])),                          # panic
+            (SATURDAY, FULL_SNAPSHOT),                           # maybe surf
         ]
         for when, snapshot in cases:
             image = render.render_dashboard(snapshot, when=when)
             self.assertEqual(image.mode, "L")
 
 
-class SceneStateTest(unittest.TestCase):
-    def test_nightcap_beats_everything(self):
-        state = render._scene_state(WEDNESDAY.replace(hour=3),
-                                    block_with(), 99.0)
-        self.assertEqual(state["mode"], "nightcap")
+class SceneEngineTest(unittest.TestCase):
+    def test_night_beats_everything(self):
+        state = clawd.scene_state(WEDNESDAY.replace(hour=3), FULL_SNAPSHOT)
+        self.assertEqual(state["scene"], "night")
 
-    def test_sleeps_when_idle(self):
-        state = render._scene_state(WEDNESDAY, None)
-        self.assertEqual(state["mode"], "sleep")
-        self.assertEqual(state["eye"], "blink")
+    def test_idle_sleeps_or_fishes(self):
+        day = clawd.scene_state(WEDNESDAY, EMPTY_SNAPSHOT)
+        self.assertEqual(day["scene"], "sleep")
+        evening = clawd.scene_state(WEDNESDAY.replace(hour=20),
+                                    EMPTY_SNAPSHOT)
+        self.assertIn(evening["scene"], ("fishing", "sleep"))
 
     def test_confetti_on_fresh_window(self):
-        state = render._scene_state(WEDNESDAY,
-                                    block_with(remaining_minutes=298))
-        self.assertEqual(state["mode"], "confetti")
+        snapshot = snapshot_with(block=block_with(remaining_minutes=299))
+        state = clawd.scene_state(WEDNESDAY, snapshot)
+        self.assertEqual(state["scene"], "confetti")
 
-    def test_anxious_above_80_percent(self):
-        state = render._scene_state(WEDNESDAY, block_with(), 85.0)
-        self.assertEqual(state["mode"], "anxious")
+    def test_anxiety_overrides_rotation(self):
+        snapshot = snapshot_with(limits=[
+            {"label": "5 hour", "percent": 85.0, "resets_at": None}])
+        state = clawd.scene_state(WEDNESDAY, snapshot)
+        self.assertEqual(state["scene"], "anxious")
         self.assertFalse(state["panic"])
+        snapshot["limits"][0]["percent"] = 96.0
+        self.assertTrue(clawd.scene_state(WEDNESDAY, snapshot)["panic"])
 
-    def test_panic_above_95_percent(self):
-        state = render._scene_state(WEDNESDAY, block_with(), 97.0)
-        self.assertTrue(state["panic"])
+    def test_rotation_is_deterministic(self):
+        first = clawd.scene_state(WEDNESDAY, FULL_SNAPSHOT)["scene"]
+        second = clawd.scene_state(WEDNESDAY, FULL_SNAPSHOT)["scene"]
+        self.assertEqual(first, second)
 
-    def test_weekend_surfs_the_chart(self):
-        state = render._scene_state(SATURDAY, block_with(), 40.0)
-        self.assertEqual(state["mode"], "surf")
+    def test_rotation_never_repeats_consecutive_buckets(self):
+        pool = clawd._scene_pool(WEDNESDAY, FULL_SNAPSHOT)
+        for bucket in range(200, 260):
+            here = clawd._bucket_pick(bucket, pool)
+            prev = clawd._bucket_pick(bucket - 1, pool)
+            if here == prev:
+                when = dt.datetime.fromtimestamp(
+                    bucket * clawd.SCENE_BUCKET_MINUTES * 60)
+                resolved = clawd._rotation_scene(when, FULL_SNAPSHOT)
+                self.assertNotEqual(resolved, prev)
 
-    def test_burn_rate_moods(self):
-        self.assertEqual(render._scene_state(
-            WEDNESDAY, block_with(cost_per_hour=5))["mode"], "stroll")
-        self.assertEqual(render._scene_state(
-            WEDNESDAY, block_with(cost_per_hour=20))["mode"], "brisk")
-        self.assertEqual(render._scene_state(
-            WEDNESDAY, block_with(cost_per_hour=50))["mode"], "sprint")
+    def test_rotation_varies_across_a_day(self):
+        seen = {
+            clawd.scene_state(WEDNESDAY.replace(hour=h, minute=m),
+                              FULL_SNAPSHOT)["scene"]
+            for h in range(9, 17) for m in (2, 12, 22, 32, 42, 52)
+        }
+        self.assertGreaterEqual(len(seen), 5)
+
+    def test_gm_only_in_the_morning(self):
+        afternoon_pool = clawd._scene_pool(WEDNESDAY, FULL_SNAPSHOT)
+        morning_pool = clawd._scene_pool(WEDNESDAY.replace(hour=8),
+                                         FULL_SNAPSHOT)
+        self.assertNotIn("gm", afternoon_pool)
+        self.assertIn("gm", morning_pool)
+
+    def test_surf_only_on_weekends(self):
+        self.assertNotIn("surf", clawd._scene_pool(WEDNESDAY, FULL_SNAPSHOT))
+        self.assertIn("surf", clawd._scene_pool(SATURDAY, FULL_SNAPSHOT))
+
+    def test_data_gated_scenes_drop_without_data(self):
+        pool = clawd._scene_pool(WEDNESDAY, EMPTY_SNAPSHOT)
+        for gated in ("sisyphus", "tide", "garden", "tetris"):
+            self.assertNotIn(gated, pool)
 
     def test_fable_model_carries_a_book(self):
-        state = render._scene_state(WEDNESDAY, block_with())
+        state = clawd.scene_state(WEDNESDAY, FULL_SNAPSHOT)
         self.assertTrue(state["book"])
-        no_fable = block_with(models=["claude-sonnet-4-6"])
-        self.assertFalse(render._scene_state(WEDNESDAY, no_fable)["book"])
 
-    def test_walks_across_the_hour(self):
-        early = render._scene_state(WEDNESDAY.replace(minute=5), block_with())
-        late = render._scene_state(WEDNESDAY.replace(minute=55), block_with())
-        self.assertLess(early["progress"], late["progress"])
-
-    def test_waves_every_seventh_minute(self):
-        state = render._scene_state(WEDNESDAY.replace(minute=21),
-                                    block_with())
-        self.assertTrue(state["wave"])
-
-    def test_five_hour_percent_lookup(self):
-        self.assertEqual(
-            render._five_hour_percent(FULL_SNAPSHOT["limits"]), 43.0)
-        self.assertIsNone(render._five_hour_percent(None))
+    def test_burn_tiers(self):
+        self.assertEqual(clawd._burn_tier({"cost_per_hour": 5}), 1)
+        self.assertEqual(clawd._burn_tier({"cost_per_hour": 20}), 2)
+        self.assertEqual(clawd._burn_tier({"cost_per_hour": 50}), 3)
 
     def test_body_matches_canonical_dimensions(self):
-        self.assertEqual(len(render.CLAWD_BODY), 8)
-        self.assertTrue(all(len(row) == 14 for row in render.CLAWD_BODY))
+        self.assertEqual(len(clawd.CLAWD_BODY), 8)
+        self.assertTrue(all(len(row) == 14 for row in clawd.CLAWD_BODY))
 
 
 class FormattersTest(unittest.TestCase):

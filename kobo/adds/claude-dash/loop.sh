@@ -47,8 +47,11 @@ while : ; do
     FETCH_TIMEOUT=20
     [ -f "$BASE/config.sh" ] && . "$BASE/config.sh"
 
+    # Report the device battery so the dashboard can show it.
+    BATT="$(cat /sys/class/power_supply/*/capacity 2>/dev/null | head -n 1)"
+
     if wget -q -T "$FETCH_TIMEOUT" -O "$RUN/dash.png.tmp" \
-            "$SERVER_URL/dashboard.png" 2>>"$RUN/log" \
+            "$SERVER_URL/dashboard.png?batt=${BATT:-}" 2>>"$RUN/log" \
        && [ -s "$RUN/dash.png.tmp" ]; then
         FAILS=0
         SUM="$(md5sum "$RUN/dash.png.tmp" 2>/dev/null | cut -d' ' -f1)"
