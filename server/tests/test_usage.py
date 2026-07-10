@@ -146,12 +146,18 @@ class TokenFreshnessTest(unittest.TestCase):
         self.assertTrue(usage.token_is_fresh({"expiresAt": "not-a-number"}))
 
     def test_stale_token_skips_endpoint(self):
-        past_ms = (dt.datetime.now()
-                   - dt.timedelta(hours=1)).timestamp() * 1000
-        result = usage.fetch_plan_limits(
-            {"accessToken": "x", "expiresAt": past_ms}
-        )
-        self.assertIsNone(result)
+        saved = usage._limits_cache
+        usage._limits_cache = {"limits": None, "fetched_at": None,
+                               "next_attempt_at": None}
+        try:
+            past_ms = (dt.datetime.now()
+                       - dt.timedelta(hours=1)).timestamp() * 1000
+            result = usage.fetch_plan_limits(
+                {"accessToken": "x", "expiresAt": past_ms}
+            )
+            self.assertIsNone(result)
+        finally:
+            usage._limits_cache = saved
 
 
 API_LIMITS_RESPONSE = {

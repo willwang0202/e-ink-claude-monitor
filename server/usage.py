@@ -296,6 +296,7 @@ def _fetch_limits_now(oauth: Optional[Dict[str, Any]]):
                 backoff = int(error.headers.get("Retry-After", "0"))
             except (TypeError, ValueError):
                 backoff = 0
+        print("[limits] endpoint returned HTTP {}".format(error.code))
         return None, backoff
     except (urllib.error.URLError, OSError, ValueError):
         return None, 0
@@ -322,12 +323,16 @@ def fetch_plan_limits(oauth: Optional[Dict[str, Any]] = None,
         fresh, backoff = _fetch_limits_now(oauth)
         wait = max(config.LIMITS_POLL_SECONDS, backoff + 30)
         if fresh is not None:
+            print("[limits {}] ok — {} window(s)".format(
+                now.strftime("%H:%M:%S"), len(fresh)))
             _limits_cache = {
                 "limits": fresh, "fetched_at": now,
                 "next_attempt_at": now + dt.timedelta(
                     seconds=config.LIMITS_POLL_SECONDS),
             }
             return fresh
+        print("[limits {}] failed (retry-after={}s) — next try in {}s".format(
+            now.strftime("%H:%M:%S"), backoff, wait))
         _limits_cache = {
             **cache,
             "next_attempt_at": now + dt.timedelta(seconds=wait),
@@ -349,10 +354,13 @@ def build_snapshot() -> Dict[str, Any]:
     ccusage_data = fetch_ccusage()
     oauth = read_oauth()
     plan = (oauth or {}).get("subscriptionType")
+    limits = fetch_plan_limits(oauth)
+    limits_at = _limits_cache.get("fetched_at")
     return {
         "fetched_at": dt.datetime.now().astimezone().isoformat(),
         "plan": plan.upper() if isinstance(plan, str) else None,
-        "limits": fetch_plan_limits(oauth),
+        "limits": limits,
+        "limits_as_of": limits_at.isoformat() if limits_at else None,
         "daily": ccusage_data["daily"],
         "block": ccusage_data["block"],
     }

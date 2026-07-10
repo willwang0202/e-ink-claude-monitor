@@ -170,11 +170,11 @@ def _draw_header(canvas: Canvas, snapshot: Dict[str, Any]) -> None:
     canvas.rule(6)
 
 
-def _draw_limits(canvas: Canvas,
-                 limits: Optional[List[Dict[str, Any]]]) -> None:
+def _draw_limits(canvas: Canvas, snapshot: Dict[str, Any]) -> None:
+    limits = snapshot.get("limits")
     canvas.section_title("Plan limits")
     if not limits:
-        canvas.text(MARGIN, "unavailable — refreshes on next claude run",
+        canvas.text(MARGIN, "waiting for the usage API (rate-limited)",
                     "small", fill=MID)
         canvas.advance(64)
         canvas.rule()
@@ -183,8 +183,24 @@ def _draw_limits(canvas: Canvas,
         reset = _fmt_reset(window.get("resets_at"))
         note = "resets " + reset if reset else ""
         canvas.progress_bar(window["label"], window["percent"], note)
+    stale_note = _limits_stale_note(snapshot.get("limits_as_of"))
+    if stale_note:
+        canvas.text_right(stale_note, "tiny", fill=MID, y=canvas.y - 12)
     canvas.advance(16)
     canvas.rule()
+
+
+def _limits_stale_note(as_of_iso: Optional[str]) -> str:
+    if not as_of_iso:
+        return ""
+    try:
+        as_of = dt.datetime.fromisoformat(as_of_iso)
+    except ValueError:
+        return ""
+    age = (dt.datetime.now() - as_of).total_seconds()
+    if age < config.LIMITS_STALE_NOTE_SECONDS:
+        return ""
+    return "as of " + as_of.strftime("%H:%M")
 
 
 def _draw_chart(canvas: Canvas, daily: Optional[Dict[str, Any]],
@@ -278,7 +294,7 @@ def render_dashboard(snapshot: Dict[str, Any],
                      when: Optional[dt.datetime] = None) -> Image.Image:
     canvas = Canvas(width, height, _load_fonts())
     _draw_header(canvas, snapshot)
-    _draw_limits(canvas, snapshot.get("limits"))
+    _draw_limits(canvas, snapshot)
     scene = clawd.draw_stage(canvas, snapshot,
                              height - LOWER_SECTIONS_HEIGHT, when)
     _draw_chart(canvas, snapshot.get("daily"), scene)
