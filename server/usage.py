@@ -200,10 +200,21 @@ def _oauth_from_keychain() -> Optional[Dict[str, Any]]:
     return data.get("claudeAiOauth")
 
 
+# The macOS keychain locks with the screen; keep the last good read so
+# the dashboard keeps working while the Mac is locked overnight.
+_oauth_memo: Optional[Dict[str, Any]] = None
+
+
 def read_oauth() -> Optional[Dict[str, Any]]:
     """Claude Code's own OAuth record (token, expiry, plan metadata)."""
+    global _oauth_memo
     oauth = _oauth_from_credentials_file() or _oauth_from_keychain()
-    return oauth if isinstance(oauth, dict) else None
+    if isinstance(oauth, dict):
+        _oauth_memo = oauth
+        return oauth
+    if _oauth_memo is not None:
+        print("[oauth] keychain unavailable — using cached credentials")
+    return _oauth_memo
 
 
 def token_is_fresh(oauth: Dict[str, Any]) -> bool:
@@ -271,10 +282,15 @@ def _fetch_limits_now(oauth: Optional[Dict[str, Any]]):
     Returns (limits_or_None, backoff_seconds). A 429's Retry-After
     becomes the backoff — retrying sooner re-trips the penalty window.
     """
-    if not oauth or not token_is_fresh(oauth):
+    if not oauth:
+        print("[limits] no credentials available")
+        return None, 0
+    if not token_is_fresh(oauth):
+        print("[limits] stored token is expired")
         return None, 0
     token = oauth.get("accessToken")
     if not token:
+        print("[limits] credential record has no access token")
         return None, 0
     request = urllib.request.Request(
         config.OAUTH_USAGE_URL,
@@ -298,7 +314,9 @@ def _fetch_limits_now(oauth: Optional[Dict[str, Any]]):
                 backoff = 0
         print("[limits] endpoint returned HTTP {}".format(error.code))
         return None, backoff
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        print("[limits] request failed: {}: {}".format(
+            type(error).__name__, error))
         return None, 0
     return parse_limits(data), 0
 

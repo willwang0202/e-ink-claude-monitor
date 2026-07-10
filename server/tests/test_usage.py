@@ -127,6 +127,33 @@ class SummarizeActiveBlockTest(unittest.TestCase):
         self.assertIsNone(usage.summarize_active_block({"blocks": []}))
 
 
+class OauthMemoTest(unittest.TestCase):
+    def setUp(self):
+        self._file = usage._oauth_from_credentials_file
+        self._keychain = usage._oauth_from_keychain
+        self._memo = usage._oauth_memo
+
+    def tearDown(self):
+        usage._oauth_from_credentials_file = self._file
+        usage._oauth_from_keychain = self._keychain
+        usage._oauth_memo = self._memo
+
+    def test_falls_back_to_memo_when_keychain_locks(self):
+        record = {"accessToken": "x", "expiresAt": 0}
+        usage._oauth_from_credentials_file = lambda: None
+        usage._oauth_from_keychain = lambda: record
+        self.assertEqual(usage.read_oauth(), record)
+        # Screen locks: keychain reads start failing.
+        usage._oauth_from_keychain = lambda: None
+        self.assertEqual(usage.read_oauth(), record)
+
+    def test_no_memo_no_credentials(self):
+        usage._oauth_memo = None
+        usage._oauth_from_credentials_file = lambda: None
+        usage._oauth_from_keychain = lambda: None
+        self.assertIsNone(usage.read_oauth())
+
+
 class TokenFreshnessTest(unittest.TestCase):
     def test_future_expiry_is_fresh(self):
         future_ms = (dt.datetime.now()
