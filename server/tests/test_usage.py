@@ -178,14 +178,14 @@ class LimitsCacheTest(unittest.TestCase):
         self._orig_fetch = usage._fetch_limits_now
         self._orig_cache = usage._limits_cache
         usage._limits_cache = {"limits": None, "fetched_at": None,
-                               "attempted_at": None}
+                               "next_attempt_at": None}
 
     def tearDown(self):
         usage._fetch_limits_now = self._orig_fetch
         usage._limits_cache = self._orig_cache
 
     def _prime(self):
-        usage._fetch_limits_now = lambda oauth: self.WINDOW
+        usage._fetch_limits_now = lambda oauth: (self.WINDOW, 0)
         return usage.fetch_plan_limits(oauth={}, now=self.T0)
 
     def test_second_call_within_window_skips_the_endpoint(self):
@@ -200,27 +200,33 @@ class LimitsCacheTest(unittest.TestCase):
 
     def test_failure_serves_last_good_reading(self):
         self._prime()
-        usage._fetch_limits_now = lambda oauth: None  # e.g. a 429
+        usage._fetch_limits_now = lambda oauth: (None, 0)  # e.g. network
         result = usage.fetch_plan_limits(
             oauth={}, now=self.T0 + dt.timedelta(seconds=400))
         self.assertEqual(result, self.WINDOW)
 
     def test_grace_expires_eventually(self):
         self._prime()
-        usage._fetch_limits_now = lambda oauth: None
+        usage._fetch_limits_now = lambda oauth: (None, 0)
         stale = self.T0 + dt.timedelta(
             seconds=usage.config.LIMITS_GRACE_SECONDS + 400)
         self.assertIsNone(usage.fetch_plan_limits(oauth={}, now=stale))
 
-    def test_failed_attempt_is_throttled_too(self):
-        usage._fetch_limits_now = lambda oauth: None
+    def test_retry_after_is_honored(self):
+        usage._fetch_limits_now = lambda oauth: (None, 851)  # a 429
         usage.fetch_plan_limits(oauth={}, now=self.T0)
 
         def explode(_oauth):
-            raise AssertionError("retried a failure inside the window")
+            raise AssertionError("retried before Retry-After elapsed")
         usage._fetch_limits_now = explode
+        # 600s later: inside the 851+30s penalty -> no request.
         usage.fetch_plan_limits(oauth={},
-                                now=self.T0 + dt.timedelta(seconds=60))
+                                now=self.T0 + dt.timedelta(seconds=600))
+        # After the penalty: a request goes out again.
+        usage._fetch_limits_now = lambda oauth: (self.WINDOW, 0)
+        result = usage.fetch_plan_limits(
+            oauth={}, now=self.T0 + dt.timedelta(seconds=900))
+        self.assertEqual(result, self.WINDOW)
 
 
 class ParseLimitsTest(unittest.TestCase):

@@ -265,14 +265,17 @@ def parse_limits(data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     return windows or None
 
 
-def _fetch_limits_now(oauth: Optional[Dict[str, Any]]
-                      ) -> Optional[List[Dict[str, Any]]]:
-    """One actual request to the usage endpoint. None on any failure."""
+def _fetch_limits_now(oauth: Optional[Dict[str, Any]]):
+    """One request to the usage endpoint.
+
+    Returns (limits_or_None, backoff_seconds). A 429's Retry-After
+    becomes the backoff — retrying sooner re-trips the penalty window.
+    """
     if not oauth or not token_is_fresh(oauth):
-        return None
+        return None, 0
     token = oauth.get("accessToken")
     if not token:
-        return None
+        return None, 0
     request = urllib.request.Request(
         config.OAUTH_USAGE_URL,
         headers={
@@ -286,15 +289,23 @@ def _fetch_limits_now(oauth: Optional[Dict[str, Any]]
             request, timeout=config.OAUTH_HTTP_TIMEOUT_SECONDS
         ) as response:
             data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        backoff = 0
+        if error.code == 429:
+            try:
+                backoff = int(error.headers.get("Retry-After", "0"))
+            except (TypeError, ValueError):
+                backoff = 0
+        return None, backoff
     except (urllib.error.URLError, OSError, ValueError):
-        return None
-    return parse_limits(data)
+        return None, 0
+    return parse_limits(data), 0
 
 
 # Poll throttle + last-good cache: the endpoint 429s under per-minute
 # polling, and a momentary failure shouldn't blank the section.
 _limits_cache: Dict[str, Any] = {
-    "limits": None, "fetched_at": None, "attempted_at": None,
+    "limits": None, "fetched_at": None, "next_attempt_at": None,
 }
 
 
@@ -306,21 +317,26 @@ def fetch_plan_limits(oauth: Optional[Dict[str, Any]] = None,
     now = now or dt.datetime.now()
     cache = _limits_cache
 
-    def _age(stamp):
-        return (now - stamp).total_seconds() if stamp else None
-
-    attempted_age = _age(cache["attempted_at"])
-    if attempted_age is None or attempted_age >= config.LIMITS_POLL_SECONDS:
+    if cache["next_attempt_at"] is None or now >= cache["next_attempt_at"]:
         oauth = oauth if oauth is not None else read_oauth()
-        fresh = _fetch_limits_now(oauth)
+        fresh, backoff = _fetch_limits_now(oauth)
+        wait = max(config.LIMITS_POLL_SECONDS, backoff + 30)
         if fresh is not None:
-            _limits_cache = {"limits": fresh, "fetched_at": now,
-                             "attempted_at": now}
+            _limits_cache = {
+                "limits": fresh, "fetched_at": now,
+                "next_attempt_at": now + dt.timedelta(
+                    seconds=config.LIMITS_POLL_SECONDS),
+            }
             return fresh
-        _limits_cache = {**cache, "attempted_at": now}
+        _limits_cache = {
+            **cache,
+            "next_attempt_at": now + dt.timedelta(seconds=wait),
+        }
+        cache = _limits_cache
 
-    fetched_age = _age(cache["fetched_at"])
-    if fetched_age is not None and fetched_age < config.LIMITS_GRACE_SECONDS:
+    fetched_at = cache["fetched_at"]
+    if fetched_at is not None and (
+            (now - fetched_at).total_seconds() < config.LIMITS_GRACE_SECONDS):
         return cache["limits"]
     return None
 
