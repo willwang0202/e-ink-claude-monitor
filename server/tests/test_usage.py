@@ -221,17 +221,18 @@ class LimitsCacheTest(unittest.TestCase):
     def test_retry_after_is_honored(self):
         usage._fetch_limits_now = lambda oauth: (None, 851)  # a 429
         usage.fetch_plan_limits(oauth={}, now=self.T0)
+        penalty = max(usage.config.LIMITS_POLL_SECONDS, 851 + 30)
 
         def explode(_oauth):
             raise AssertionError("retried before Retry-After elapsed")
         usage._fetch_limits_now = explode
-        # 600s later: inside the 851+30s penalty -> no request.
-        usage.fetch_plan_limits(oauth={},
-                                now=self.T0 + dt.timedelta(seconds=600))
+        # Inside the penalty window -> no request.
+        usage.fetch_plan_limits(
+            oauth={}, now=self.T0 + dt.timedelta(seconds=penalty - 60))
         # After the penalty: a request goes out again.
         usage._fetch_limits_now = lambda oauth: (self.WINDOW, 0)
         result = usage.fetch_plan_limits(
-            oauth={}, now=self.T0 + dt.timedelta(seconds=900))
+            oauth={}, now=self.T0 + dt.timedelta(seconds=penalty + 60))
         self.assertEqual(result, self.WINDOW)
 
 
