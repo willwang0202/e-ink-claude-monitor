@@ -138,9 +138,12 @@ class TokenFreshnessTest(unittest.TestCase):
                    - dt.timedelta(hours=1)).timestamp() * 1000
         self.assertFalse(usage.token_is_fresh({"expiresAt": past_ms}))
 
-    def test_missing_expiry_is_stale(self):
-        self.assertFalse(usage.token_is_fresh({}))
-        self.assertFalse(usage.token_is_fresh({"expiresAt": "not-a-number"}))
+    def test_unknown_expiry_is_optimistic(self):
+        # Newer Claude Code stores expiresAt as 0; missing/garbage values
+        # also mean "unknown" — attempt the call, let a 401 decide.
+        self.assertTrue(usage.token_is_fresh({}))
+        self.assertTrue(usage.token_is_fresh({"expiresAt": 0}))
+        self.assertTrue(usage.token_is_fresh({"expiresAt": "not-a-number"}))
 
     def test_stale_token_skips_endpoint(self):
         past_ms = (dt.datetime.now()
@@ -165,6 +168,59 @@ API_LIMITS_RESPONSE = {
                    "surface": None}},
     ],
 }
+
+
+class LimitsCacheTest(unittest.TestCase):
+    T0 = dt.datetime(2026, 7, 10, 9, 0, 0)
+    WINDOW = [{"label": "5 hour", "percent": 10.0, "resets_at": None}]
+
+    def setUp(self):
+        self._orig_fetch = usage._fetch_limits_now
+        self._orig_cache = usage._limits_cache
+        usage._limits_cache = {"limits": None, "fetched_at": None,
+                               "attempted_at": None}
+
+    def tearDown(self):
+        usage._fetch_limits_now = self._orig_fetch
+        usage._limits_cache = self._orig_cache
+
+    def _prime(self):
+        usage._fetch_limits_now = lambda oauth: self.WINDOW
+        return usage.fetch_plan_limits(oauth={}, now=self.T0)
+
+    def test_second_call_within_window_skips_the_endpoint(self):
+        self._prime()
+
+        def explode(_oauth):
+            raise AssertionError("endpoint hit inside poll window")
+        usage._fetch_limits_now = explode
+        result = usage.fetch_plan_limits(
+            oauth={}, now=self.T0 + dt.timedelta(seconds=60))
+        self.assertEqual(result, self.WINDOW)
+
+    def test_failure_serves_last_good_reading(self):
+        self._prime()
+        usage._fetch_limits_now = lambda oauth: None  # e.g. a 429
+        result = usage.fetch_plan_limits(
+            oauth={}, now=self.T0 + dt.timedelta(seconds=400))
+        self.assertEqual(result, self.WINDOW)
+
+    def test_grace_expires_eventually(self):
+        self._prime()
+        usage._fetch_limits_now = lambda oauth: None
+        stale = self.T0 + dt.timedelta(
+            seconds=usage.config.LIMITS_GRACE_SECONDS + 400)
+        self.assertIsNone(usage.fetch_plan_limits(oauth={}, now=stale))
+
+    def test_failed_attempt_is_throttled_too(self):
+        usage._fetch_limits_now = lambda oauth: None
+        usage.fetch_plan_limits(oauth={}, now=self.T0)
+
+        def explode(_oauth):
+            raise AssertionError("retried a failure inside the window")
+        usage._fetch_limits_now = explode
+        usage.fetch_plan_limits(oauth={},
+                                now=self.T0 + dt.timedelta(seconds=60))
 
 
 class ParseLimitsTest(unittest.TestCase):

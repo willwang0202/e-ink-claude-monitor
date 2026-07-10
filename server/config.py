@@ -17,6 +17,10 @@ OAUTH_HTTP_TIMEOUT_SECONDS = 15
 
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
+# The oauth/usage endpoint rate-limits aggressive polling; ask it gently
+# and reuse the last good answer in between (limits move slowly).
+LIMITS_POLL_SECONDS = 300
+LIMITS_GRACE_SECONDS = 7200
 
 # Only usage rows for these model prefixes count toward the dashboard.
 CLAUDE_MODEL_PREFIX = "claude"

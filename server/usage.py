@@ -207,16 +207,17 @@ def read_oauth() -> Optional[Dict[str, Any]]:
 
 
 def token_is_fresh(oauth: Dict[str, Any]) -> bool:
-    """True when the stored access token has not expired yet.
+    """False only when the stored token is *provably* expired.
 
-    Claude Code rotates this token whenever the CLI talks to the API; we
+    Claude Code rotates this token whenever it talks to the API; we
     never refresh it ourselves (consuming the refresh token could
-    invalidate the user's login), so an expired token just means the
-    limits section is skipped until the next `claude` run.
+    invalidate the user's login). Newer Claude Code versions store
+    expiresAt as 0 — an unknown expiry means we attempt the request and
+    let a 401 hide the section instead of pre-emptively skipping.
     """
     expires_ms = oauth.get("expiresAt")
-    if not isinstance(expires_ms, (int, float)):
-        return False
+    if not isinstance(expires_ms, (int, float)) or expires_ms <= 0:
+        return True
     expiry = dt.datetime.fromtimestamp(expires_ms / 1000.0)
     return expiry > dt.datetime.now() + dt.timedelta(minutes=1)
 
@@ -264,10 +265,9 @@ def parse_limits(data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     return windows or None
 
 
-def fetch_plan_limits(oauth: Optional[Dict[str, Any]] = None
-                      ) -> Optional[Dict[str, Any]]:
-    """Best-effort fetch of subscription limit meters. None if unavailable."""
-    oauth = oauth if oauth is not None else read_oauth()
+def _fetch_limits_now(oauth: Optional[Dict[str, Any]]
+                      ) -> Optional[List[Dict[str, Any]]]:
+    """One actual request to the usage endpoint. None on any failure."""
     if not oauth or not token_is_fresh(oauth):
         return None
     token = oauth.get("accessToken")
@@ -289,6 +289,40 @@ def fetch_plan_limits(oauth: Optional[Dict[str, Any]] = None
     except (urllib.error.URLError, OSError, ValueError):
         return None
     return parse_limits(data)
+
+
+# Poll throttle + last-good cache: the endpoint 429s under per-minute
+# polling, and a momentary failure shouldn't blank the section.
+_limits_cache: Dict[str, Any] = {
+    "limits": None, "fetched_at": None, "attempted_at": None,
+}
+
+
+def fetch_plan_limits(oauth: Optional[Dict[str, Any]] = None,
+                      now: Optional[dt.datetime] = None
+                      ) -> Optional[List[Dict[str, Any]]]:
+    """Rate-limited fetch of the subscription meters with a grace cache."""
+    global _limits_cache
+    now = now or dt.datetime.now()
+    cache = _limits_cache
+
+    def _age(stamp):
+        return (now - stamp).total_seconds() if stamp else None
+
+    attempted_age = _age(cache["attempted_at"])
+    if attempted_age is None or attempted_age >= config.LIMITS_POLL_SECONDS:
+        oauth = oauth if oauth is not None else read_oauth()
+        fresh = _fetch_limits_now(oauth)
+        if fresh is not None:
+            _limits_cache = {"limits": fresh, "fetched_at": now,
+                             "attempted_at": now}
+            return fresh
+        _limits_cache = {**cache, "attempted_at": now}
+
+    fetched_age = _age(cache["fetched_at"])
+    if fetched_age is not None and fetched_age < config.LIMITS_GRACE_SECONDS:
+        return cache["limits"]
+    return None
 
 
 # -------------------------------------------------------------- snapshot
