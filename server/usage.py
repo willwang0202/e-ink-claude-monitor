@@ -9,6 +9,7 @@ Two independent sources, each optional:
 
 import datetime as dt
 import json
+import re
 import shutil
 import subprocess
 import urllib.error
@@ -188,16 +189,61 @@ def _oauth_from_credentials_file() -> Optional[Dict[str, Any]]:
     return data.get("claudeAiOauth")
 
 
-def _oauth_from_keychain() -> Optional[Dict[str, Any]]:
+def _read_keychain_service(service: str) -> Optional[Dict[str, Any]]:
     raw = _run(
-        ["security", "find-generic-password",
-         "-s", "Claude Code-credentials", "-w"],
+        ["security", "find-generic-password", "-s", service, "-w"],
         config.KEYCHAIN_TIMEOUT_SECONDS,
     )
     data = _parse_json(raw)
     if data is None:
         return None
     return data.get("claudeAiOauth")
+
+
+def _keychain_service_candidates() -> List[str]:
+    """Newer Claude Code versions store credentials under per-session
+    items named 'Claude Code-credentials-<hash>'; list them (metadata
+    only — service names, no secrets)."""
+    raw = _run(["security", "dump-keychain"],
+               config.KEYCHAIN_DUMP_TIMEOUT_SECONDS)
+    if not raw:
+        return []
+    names = re.findall(r'"svce"<blob>="(Claude Code-credentials-[^"]+)"',
+                       raw)
+    return list(dict.fromkeys(names))
+
+
+def _has_token(oauth: Optional[Dict[str, Any]]) -> bool:
+    return bool(isinstance(oauth, dict) and oauth.get("accessToken"))
+
+
+_keychain_service_memo: Optional[str] = None
+
+
+def _oauth_from_keychain() -> Optional[Dict[str, Any]]:
+    """Find a credential record with a live token, remembering which
+    keychain item held it so later reads go straight there."""
+    global _keychain_service_memo
+    if _keychain_service_memo:
+        oauth = _read_keychain_service(_keychain_service_memo)
+        if _has_token(oauth):
+            return oauth
+        _keychain_service_memo = None
+    oauth = _read_keychain_service("Claude Code-credentials")
+    if _has_token(oauth):
+        _keychain_service_memo = "Claude Code-credentials"
+        return oauth
+    fallback = oauth  # token-less stub still carries plan metadata
+    for service in _keychain_service_candidates():
+        candidate = _read_keychain_service(service)
+        if _has_token(candidate):
+            _keychain_service_memo = service
+            print("[oauth] live token found in keychain item "
+                  "'{}'".format(service))
+            return candidate
+        if fallback is None and isinstance(candidate, dict):
+            fallback = candidate
+    return fallback
 
 
 # The macOS keychain locks with the screen; keep the last good read so

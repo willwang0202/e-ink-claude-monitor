@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -125,6 +126,80 @@ class SummarizeActiveBlockTest(unittest.TestCase):
 
     def test_no_active_block_returns_none(self):
         self.assertIsNone(usage.summarize_active_block({"blocks": []}))
+
+
+DUMP_FIXTURE = '''
+    0x00000007 <blob>="Claude Safe Storage"
+    "svce"<blob>="Claude Safe Storage"
+    0x00000007 <blob>="Claude Code-credentials-9de0d0a7"
+    "svce"<blob>="Claude Code-credentials-9de0d0a7"
+    0x00000007 <blob>="Claude Code-credentials-c1481fca"
+    "svce"<blob>="Claude Code-credentials-c1481fca"
+    0x00000007 <blob>="Claude Code-credentials"
+    "svce"<blob>="Claude Code-credentials"
+    0x00000007 <blob>="Claude Code-credentials-9de0d0a7"
+    "svce"<blob>="Claude Code-credentials-9de0d0a7"
+'''
+
+
+class KeychainDiscoveryTest(unittest.TestCase):
+    STUB = {"claudeAiOauth": {"accessToken": "", "expiresAt": 0}}
+    LIVE = {"claudeAiOauth": {"accessToken": "tok", "expiresAt": 0,
+                              "subscriptionType": "pro"}}
+
+    def setUp(self):
+        self._run = usage._run
+        self._memo = usage._keychain_service_memo
+        usage._keychain_service_memo = None
+
+    def tearDown(self):
+        usage._run = self._run
+        usage._keychain_service_memo = self._memo
+
+    def _fake_run(self, records):
+        def run(cmd, timeout):
+            if cmd[:2] == ["security", "dump-keychain"]:
+                return DUMP_FIXTURE
+            if cmd[:2] == ["security", "find-generic-password"]:
+                service = cmd[cmd.index("-s") + 1]
+                record = records.get(service)
+                return json.dumps(record) if record else None
+            return None
+        return run
+
+    def test_candidates_parse_suffixed_names_deduped(self):
+        usage._run = self._fake_run({})
+        self.assertEqual(usage._keychain_service_candidates(),
+                         ["Claude Code-credentials-9de0d0a7",
+                          "Claude Code-credentials-c1481fca"])
+
+    def test_finds_live_token_behind_stub(self):
+        usage._run = self._fake_run({
+            "Claude Code-credentials": self.STUB,
+            "Claude Code-credentials-9de0d0a7": self.STUB,
+            "Claude Code-credentials-c1481fca": self.LIVE,
+        })
+        oauth = usage._oauth_from_keychain()
+        self.assertEqual(oauth["accessToken"], "tok")
+        self.assertEqual(usage._keychain_service_memo,
+                         "Claude Code-credentials-c1481fca")
+
+    def test_memo_skips_rescan(self):
+        usage._keychain_service_memo = "Claude Code-credentials-c1481fca"
+
+        def run(cmd, timeout):
+            if cmd[:2] == ["security", "dump-keychain"]:
+                raise AssertionError("re-scanned despite memo")
+            return json.dumps(self.LIVE)
+        usage._run = run
+        self.assertEqual(usage._oauth_from_keychain()["accessToken"], "tok")
+
+    def test_falls_back_to_stub_when_no_live_token(self):
+        usage._run = self._fake_run({
+            "Claude Code-credentials": self.STUB,
+        })
+        oauth = usage._oauth_from_keychain()
+        self.assertEqual(oauth.get("accessToken"), "")
 
 
 class OauthMemoTest(unittest.TestCase):
