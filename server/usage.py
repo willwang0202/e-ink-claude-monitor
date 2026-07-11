@@ -180,6 +180,19 @@ def fetch_ccusage(today: Optional[dt.date] = None) -> Dict[str, Any]:
 
 # ----------------------------------------------------------- plan limits
 
+def _oauth_from_token_file() -> Optional[Dict[str, Any]]:
+    """Manual escape hatch: `claude setup-token` output saved to
+    ~/.claude-dash-token gives the dashboard a long-lived token that
+    survives any credential-storage reshuffle."""
+    try:
+        token = (Path.home() / ".claude-dash-token").read_text().strip()
+    except OSError:
+        return None
+    if not token.startswith("sk-ant-"):
+        return None
+    return {"accessToken": token, "expiresAt": 0}
+
+
 def _oauth_from_credentials_file() -> Optional[Dict[str, Any]]:
     path = Path.home() / ".claude" / ".credentials.json"
     try:
@@ -194,10 +207,16 @@ def _read_keychain_service(service: str) -> Optional[Dict[str, Any]]:
         ["security", "find-generic-password", "-s", service, "-w"],
         config.KEYCHAIN_TIMEOUT_SECONDS,
     )
-    data = _parse_json(raw)
-    if data is None:
+    if raw is None:
         return None
-    return data.get("claudeAiOauth")
+    data = _parse_json(raw)
+    if isinstance(data, dict):
+        return data.get("claudeAiOauth")
+    # Newer items may hold the bare token string instead of JSON.
+    token = raw.strip()
+    if token.startswith("sk-ant-"):
+        return {"accessToken": token, "expiresAt": 0, "bare": True}
+    return None
 
 
 def _keychain_service_candidates() -> List[str]:
@@ -240,6 +259,9 @@ def _oauth_from_keychain() -> Optional[Dict[str, Any]]:
             _keychain_service_memo = service
             print("[oauth] live token found in keychain item "
                   "'{}'".format(service))
+            if candidate.get("bare") and isinstance(fallback, dict):
+                # keep plan metadata from the stub record
+                candidate = {**fallback, **candidate}
             return candidate
         if fallback is None and isinstance(candidate, dict):
             fallback = candidate
@@ -254,7 +276,8 @@ _oauth_memo: Optional[Dict[str, Any]] = None
 def read_oauth() -> Optional[Dict[str, Any]]:
     """Claude Code's own OAuth record (token, expiry, plan metadata)."""
     global _oauth_memo
-    oauth = _oauth_from_credentials_file() or _oauth_from_keychain()
+    oauth = (_oauth_from_token_file() or _oauth_from_credentials_file()
+             or _oauth_from_keychain())
     if isinstance(oauth, dict):
         _oauth_memo = oauth
         return oauth

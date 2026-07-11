@@ -201,6 +201,32 @@ class KeychainDiscoveryTest(unittest.TestCase):
         oauth = usage._oauth_from_keychain()
         self.assertEqual(oauth.get("accessToken"), "")
 
+    def test_bare_token_item_merges_stub_metadata(self):
+        stub = {"claudeAiOauth": {"accessToken": "", "expiresAt": 0,
+                                  "subscriptionType": "pro"}}
+
+        def run(cmd, timeout):
+            if cmd[:2] == ["security", "dump-keychain"]:
+                return DUMP_FIXTURE
+            service = cmd[cmd.index("-s") + 1]
+            if service == "Claude Code-credentials":
+                return json.dumps(stub)
+            if service == "Claude Code-credentials-c1481fca":
+                return "sk-ant-oat01-example\n"
+            return None
+        usage._run = run
+        oauth = usage._oauth_from_keychain()
+        self.assertEqual(oauth["accessToken"], "sk-ant-oat01-example")
+        self.assertEqual(oauth["subscriptionType"], "pro")
+
+    def test_non_token_payloads_are_ignored(self):
+        def run(cmd, timeout):
+            if cmd[:2] == ["security", "dump-keychain"]:
+                return DUMP_FIXTURE
+            return "deadbeef0badc0de"  # hex blob, not a token
+        usage._run = run
+        self.assertIsNone(usage._oauth_from_keychain())
+
 
 class OauthMemoTest(unittest.TestCase):
     def setUp(self):
