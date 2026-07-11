@@ -397,11 +397,43 @@ _limits_cache: Dict[str, Any] = {
 }
 
 
+def _limits_from_statusline() -> Optional[List[Dict[str, Any]]]:
+    """Plan meters captured by scripts/statusline-bridge.sh — the
+    official local channel; Claude Code refreshes it every turn."""
+    path = Path.home() / ".claude-dash-limits.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    age = dt.datetime.now().timestamp() - float(data.get("captured_at", 0))
+    if age > config.LIMITS_GRACE_SECONDS:
+        return None
+    limits = data.get("rate_limits") or {}
+    windows = []
+    for key, label in (("five_hour", "5 hour"), ("seven_day", "Week")):
+        raw = limits.get(key)
+        if not isinstance(raw, dict):
+            continue
+        percent = raw.get("used_percentage",
+                          raw.get("utilization"))
+        if percent is None:
+            continue
+        windows.append({"label": label, "percent": float(percent),
+                        "resets_at": raw.get("resets_at")})
+    return windows or None
+
+
 def fetch_plan_limits(oauth: Optional[Dict[str, Any]] = None,
                       now: Optional[dt.datetime] = None
                       ) -> Optional[List[Dict[str, Any]]]:
     """Rate-limited fetch of the subscription meters with a grace cache."""
     global _limits_cache
+    from_statusline = _limits_from_statusline()
+    if from_statusline is not None:
+        _limits_cache = {"limits": from_statusline,
+                         "fetched_at": dt.datetime.now(),
+                         "next_attempt_at": _limits_cache["next_attempt_at"]}
+        return from_statusline
     now = now or dt.datetime.now()
     cache = _limits_cache
 
